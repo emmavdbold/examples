@@ -5,9 +5,12 @@
 #
 ###############################################################################
 import argparse
+
 import torch
 
 import data
+
+import random
 
 parser = argparse.ArgumentParser(description='PyTorch Wikitext-2 Language Model')
 # Model parameters.
@@ -27,6 +30,8 @@ parser.add_argument('--temperature', type=float, default=1.0,
                     help='temperature - higher will increase diversity')
 parser.add_argument('--log-interval', type=int, default=100,
                     help='reporting interval')
+parser.add_argument('--input', type=str, default=None,
+                    help='first word(s) of the text to be generated')
 args = parser.parse_args()
 
 # Set the random seed manually for reproducibility.
@@ -50,7 +55,27 @@ ntokens = len(corpus.dictionary)
 is_transformer_model = hasattr(model, 'model_type') and model.model_type == 'Transformer'
 if not is_transformer_model:
     hidden = model.init_hidden(1)
-input = torch.randint(ntokens, (1, 1), dtype=torch.long).to(device)
+
+if args.input:
+    
+    assert not is_transformer_model, "Input prompts are currently not supported for Transformer models."
+    input_list = args.input.split()
+    get_words_not_in_vocab = lambda word_list : [word for word in word_list if word not in corpus.dictionary.word2idx]
+    words_not_in_vocab = get_words_not_in_vocab(input_list)
+
+    while words_not_in_vocab:
+        words_not_in_vocab = ', '.join(words_not_in_vocab)
+        sample_words = ', '.join(random.sample(['"' + word + '"' for word in list(corpus.dictionary.word2idx.keys())], 5))
+        new_input = input(f"These words are not part of the vocabulary: {words_not_in_vocab}.\n\
+            Here are a few suggestions: {sample_words}.\n\
+            Type in another input prompt: ")
+        input_list = new_input.split()
+        words_not_in_vocab = get_words_not_in_vocab(input_list)
+    
+    input_length = len(input_list)
+
+else:
+    input = torch.randint(ntokens, (1, 1), dtype=torch.long).to(device)
 
 with open(args.outf, 'w') as outf:
     with torch.no_grad():  # no tracking history
@@ -62,10 +87,18 @@ with open(args.outf, 'w') as outf:
                 word_tensor = torch.Tensor([[word_idx]]).long().to(device)
                 input = torch.cat([input, word_tensor], 0)
             else:
-                output, hidden = model(input, hidden)
-                word_weights = output.squeeze().div(args.temperature).exp().cpu()
-                word_idx = torch.multinomial(word_weights, 1)[0]
-                input.fill_(word_idx)
+                if args.input and i < input_length:
+                    # tensor([[word_index]])
+                    input = torch.tensor(corpus.dictionary.word2idx[input_list[i]]).reshape((1, 1)).to(device)
+                    # pass input through model -- hidden updated each time
+                    output, hidden = model(input, hidden)
+                    # store index of word in new variable for use below    
+                    word_idx = input
+                else:
+                    output, hidden = model(input, hidden)
+                    word_weights = output.squeeze().div(args.temperature).exp().cpu()
+                    word_idx = torch.multinomial(word_weights, 1)[0]
+                    input.fill_(word_idx)
 
             word = corpus.dictionary.idx2word[word_idx]
 
